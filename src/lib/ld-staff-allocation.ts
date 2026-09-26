@@ -49,7 +49,8 @@ export function calculateLdStaffAllocation(
 
   const uniqueCases = getLdCountableCases(cases, periodStart, periodEnd, paidOnly);
 
-  const assignedCases = uniqueCases.filter((labCase: any) => !!labCase.assigned_technician_id);
+  // Pay is only allocated once a case is marked as delivered.
+  const assignedCases = uniqueCases.filter((labCase: any) => !!labCase.assigned_technician_id && labCase.status === "delivered");
   const unassignedCases = uniqueCases.filter((labCase: any) => !labCase.assigned_technician_id);
 
   const draftByStaffId: Record<string, any> = {};
@@ -189,8 +190,10 @@ export function calculateLdStaffAllocation(
   // only when remark is Repeat/Remake OR repeat_of_case_id is set AND
   // original_technician_id is populated.
   const repeatCounts: Record<string, number> = {};
+  const repeatPenaltyRaw: Record<string, number> = {};
   (cases || []).forEach((labCase: any) => {
-    if (!labCase.original_technician_id) return;
+    const origId = labCase.original_technician_id;
+    if (!origId) return;
     const isRepeat =
       labCase.remark === "Repeat" ||
       labCase.remark === "Remake" ||
@@ -198,8 +201,16 @@ export function calculateLdStaffAllocation(
     if (!isRepeat) return;
     const caseDate = new Date(labCase.received_date || labCase.created_at);
     if (caseDate < periodStart || caseDate > periodEnd) return;
-    repeatCounts[labCase.original_technician_id] =
-      (repeatCounts[labCase.original_technician_id] || 0) + 1;
+    repeatCounts[origId] = (repeatCounts[origId] || 0) + 1;
+    const draft = draftByStaffId[origId];
+    if (!draft) return;
+    // Penalty per repeat = 1.5x the tech's output share + their basic share of that case's value
+    const units = getLdCaseUnits(labCase);
+    const unitPrice = getLdAllocationUnitPrice(labCase, workTypes, clientPrices);
+    const caseBase = unitPrice * units;
+    const outputShare = caseBase * 0.2 * (draft.output_percentage / 100);
+    const basicShare = caseBase * 0.1 * (draft.basic_percentage / 100);
+    repeatPenaltyRaw[origId] = (repeatPenaltyRaw[origId] || 0) + outputShare * 1.5 + basicShare;
   });
 
   const allocations = activeStaff
@@ -207,9 +218,7 @@ export function calculateLdStaffAllocation(
     .map((member: any) => {
       const draft = draftByStaffId[member.id];
       const repeatCount = repeatCounts[member.id] || 0;
-      const repeatPenalty = repeatCount > 0 && draft.jobs_count > 0
-        ? repeatCount * (((draft.output_allocation_raw / draft.jobs_count) * 1.5) + (draft.basic_allocation_raw / draft.jobs_count))
-        : 0;
+      const repeatPenalty = repeatPenaltyRaw[member.id] || 0;
 
       const grossAllocation = draft.basic_allocation_raw + draft.output_allocation_raw;
       const totalAllocation = Math.max(
