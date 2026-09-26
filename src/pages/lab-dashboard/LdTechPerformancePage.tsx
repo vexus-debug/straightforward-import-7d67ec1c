@@ -6,6 +6,8 @@ import { Progress } from "@/components/ui/progress";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { useAllSharedAllocations } from "@/hooks/useLdSharedAllocations";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { PageHeader } from "@/components/dashboard/PageHeader";
 import { useLdCases, useLdStaff, useLdWorkTypes } from "@/hooks/useLabDashboard";
@@ -22,8 +24,8 @@ import { StatsHelpButton } from "@/components/lab-dashboard/StatsHelpButton";
 import { TECH_PERFORMANCE_HELP } from "@/components/lab-dashboard/statsHelpContent";
 import { format, startOfMonth, endOfMonth, startOfYear, endOfYear } from "date-fns";
 
-function computePerformance(cases: any[], technicians: any[], dateStart: Date, dateEnd: Date, salaryConfigs: any[] = [], workTypes: any[] = [], clientPrices: any[] = []) {
-  const allocation = calculateStaffRevenueAllocation(cases, technicians, salaryConfigs, dateStart, dateEnd, false, [], workTypes, clientPrices);
+function computePerformance(cases: any[], technicians: any[], dateStart: Date, dateEnd: Date, salaryConfigs: any[] = [], workTypes: any[] = [], clientPrices: any[] = [], sharedAllocations: any[] = []) {
+  const allocation = calculateStaffRevenueAllocation(cases, technicians, salaryConfigs, dateStart, dateEnd, false, sharedAllocations, workTypes, clientPrices);
   const allocationByStaffId = new Map(allocation.allocations.map((item: any) => [item.staff_id, item]));
 
   const periodCases = getLdCountableCases(cases, dateStart, dateEnd);
@@ -76,6 +78,12 @@ function computePerformance(cases: any[], technicians: any[], dateStart: Date, d
     const urgent = techCases.filter((c: any) => c.is_urgent && !["delivered"].includes(c.status)).length;
 
     const repeatPenalties = allRepeatCases.filter((c: any) => c.original_technician_id === tech.id).length;
+    const deliveredList = techCases.filter((c: any) => c.status === "delivered");
+    const caseById = new Map(periodCases.map((c: any) => [c.id, c]));
+    const assistedList = (sharedAllocations || [])
+      .filter((sa: any) => (sa.original_tech_id === tech.id || sa.helper_tech_id === tech.id) && caseById.has(sa.case_id))
+      .map((sa: any) => ({ ...sa, case: caseById.get(sa.case_id) }));
+    const repeatList = allRepeatCases.filter((c: any) => c.original_technician_id === tech.id);
     const bonusReassignments = periodCases.filter((c: any) => c.bonus_reassignment_tech_id === tech.id);
 
     const fullRevenue = techCases
@@ -120,12 +128,16 @@ function computePerformance(cases: any[], technicians: any[], dateStart: Date, d
       outputPct: Number(staffAllocation?.output_percentage ?? staffConfig.output_percentage),
       salaryBase,
       repeatPenaltyAmount: Math.round(repeatPenaltyAmount * 100) / 100,
+      sharedDebit: Number(staffAllocation?.shared_debit || 0),
+      sharedCredit: Number(staffAllocation?.shared_credit || 0),
+      delivered: deliveredList.length, deliveredList, assistedList, repeatList,
     };
   }).sort((a, b) => b.total - a.total);
 }
 
 function PerformanceCards({ data, deductions, periodStart, periodEnd }: { data: ReturnType<typeof computePerformance>; deductions: any[]; periodStart: string; periodEnd: string }) {
   const navigate = useNavigate();
+  const [drill, setDrill] = useState<{ title: string; rows: { code: string; note?: string }[] } | null>(null);
   const topPerformer = data.reduce((best, t) => t.completionRate > (best?.completionRate || 0) ? t : best, data[0]);
   const chartData = data.map(t => ({
     name: t.name.split(" ")[0],
@@ -188,8 +200,8 @@ function PerformanceCards({ data, deductions, periodStart, periodEnd }: { data: 
           const latenessTotal = techDeductions.filter((d: any) => d.deduction_type === "lateness").reduce((s: number, d: any) => s + Number(d.amount), 0);
           const bonusTotal = techDeductions.filter((d: any) => d.deduction_type === "bonus").reduce((s: number, d: any) => s + Number(d.amount), 0);
 
-          const totalDebits = loanTotal + tech.repeatPenaltyAmount + latenessTotal;
-          const totalCredits = bonusTotal;
+          const totalDebits = loanTotal + tech.repeatPenaltyAmount + latenessTotal + tech.sharedDebit;
+          const totalCredits = bonusTotal + tech.sharedCredit;
           const finalSalary = Math.max(tech.salaryBase - totalDebits + totalCredits, 0);
 
           return (
@@ -224,9 +236,9 @@ function PerformanceCards({ data, deductions, periodStart, periodEnd }: { data: 
                     <Progress value={tech.completionRate} className="h-2" />
                   </div>
                   <div className="grid grid-cols-5 gap-2 text-center pt-2 border-t border-border/30">
-                    <div><p className="text-sm font-semibold text-emerald-600">{tech.fullyCompleted}</p><p className="text-[9px] text-muted-foreground">Full</p></div>
-                    <div><p className="text-sm font-semibold text-amber-500">{tech.partiallyCompleted}</p><p className="text-[9px] text-muted-foreground">Partial</p></div>
-                    <div><p className="text-sm font-semibold text-blue-500">{tech.inProgress}</p><p className="text-[9px] text-muted-foreground">In Prog</p></div>
+                    <button type="button" className="rounded hover:bg-muted" onClick={() => setDrill({ title: `${tech.name} — Delivered`, rows: tech.deliveredList.map((c: any) => ({ code: c.case_number, note: c.patient_name || "" })) })}><p className="text-sm font-semibold text-emerald-600">{tech.delivered}</p><p className="text-[9px] text-muted-foreground">Delivered</p></button>
+                    <button type="button" className="rounded hover:bg-muted" onClick={() => setDrill({ title: `${tech.name} — Partial (assisted)`, rows: tech.assistedList.map((a: any) => ({ code: a.case?.case_number, note: a.original_tech_id === tech.id ? `Helped by ${a.helper_tech?.full_name || "—"} (${a.share_percentage}%)` : `Helped ${a.original_tech?.full_name || "—"} (${a.share_percentage}%)` })) })}><p className="text-sm font-semibold text-amber-500">{tech.assistedList.length}</p><p className="text-[9px] text-muted-foreground">Partial</p></button>
+                    <button type="button" className="rounded hover:bg-muted" onClick={() => setDrill({ title: `${tech.name} — Repeats (penalty ${fmt(tech.repeatPenaltyAmount)})`, rows: tech.repeatList.map((c: any) => ({ code: c.case_number, note: c.remark || "Repeat" })) })}><p className="text-sm font-semibold text-blue-500">{tech.repeatList.length}</p><p className="text-[9px] text-muted-foreground">Repeat</p></button>
                     <div><p className="text-sm font-semibold text-destructive">{tech.rejected}</p><p className="text-[9px] text-muted-foreground">Rejected</p></div>
                     <div><p className="text-sm font-semibold text-amber-500">{tech.overdue}</p><p className="text-[9px] text-muted-foreground">Overdue</p></div>
                   </div>
@@ -247,7 +259,7 @@ function PerformanceCards({ data, deductions, periodStart, periodEnd }: { data: 
                     </div>
 
                     {/* Debits */}
-                    {(loanTotal > 0 || tech.repeatPenaltyAmount > 0 || latenessTotal > 0) && (
+                    {(loanTotal > 0 || tech.repeatPenaltyAmount > 0 || latenessTotal > 0 || tech.sharedDebit > 0) && (
                       <div className="p-2 rounded bg-destructive/5 border border-destructive/10 space-y-1">
                         <p className="text-[10px] font-semibold text-destructive flex items-center gap-1"><Minus className="h-3 w-3" /> Debits</p>
                         <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 text-[11px]">
@@ -257,18 +269,21 @@ function PerformanceCards({ data, deductions, periodStart, periodEnd }: { data: 
                             onClick={() => navigate(`/lab-dashboard/cases?${new URLSearchParams({ originalTech: tech.id, from: periodStart, to: periodEnd, remark: "Repeat" }).toString()}`)}
                             title="Click to view repeat/remake cases"
                           >Repeat deductions</span><span className="text-right text-destructive">-{fmt(tech.repeatPenaltyAmount)}</span></>)}
+                          {tech.sharedDebit > 0 && (<><span className="text-muted-foreground">Partial (assisted)</span><span className="text-right text-destructive">-{fmt(tech.sharedDebit)}</span></>)}
                           {latenessTotal > 0 && (<><span className="text-muted-foreground">Lateness</span><span className="text-right text-destructive">-{fmt(latenessTotal)}</span></>)}
                         </div>
                       </div>
                     )}
 
                     {/* Credits */}
-                    {bonusTotal > 0 && (
+                    {(bonusTotal > 0 || tech.sharedCredit > 0) && (
                       <div className="p-2 rounded bg-emerald-500/5 border border-emerald-500/10 space-y-1">
                         <p className="text-[10px] font-semibold text-emerald-600 flex items-center gap-1"><PlusIcon className="h-3 w-3" /> Credits</p>
                         <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 text-[11px]">
-                          <span className="text-muted-foreground">Bonus</span>
-                          <span className="text-right text-emerald-600">+{fmt(bonusTotal)}</span>
+                          {bonusTotal > 0 && (<><span className="text-muted-foreground">Bonus</span>
+                          <span className="text-right text-emerald-600">+{fmt(bonusTotal)}</span></>)}
+                          {tech.sharedCredit > 0 && (<><span className="text-muted-foreground">Assistance given</span>
+                          <span className="text-right text-emerald-600">+{fmt(tech.sharedCredit)}</span></>)}
                         </div>
                       </div>
                     )}
@@ -315,6 +330,16 @@ function PerformanceCards({ data, deductions, periodStart, periodEnd }: { data: 
           </div>
         )}
       </div>
+      <Dialog open={!!drill} onOpenChange={(o) => !o && setDrill(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader><DialogTitle className="text-base">{drill?.title}</DialogTitle></DialogHeader>
+          <div className="max-h-[60vh] overflow-y-auto divide-y divide-border">
+            {drill?.rows.length ? drill.rows.map((r, i) => (
+              <div key={i} className="flex justify-between py-2 text-sm"><span className="font-mono">{r.code}</span><span className="text-muted-foreground text-xs">{r.note}</span></div>
+            )) : <p className="text-sm text-muted-foreground py-4 text-center">No cases.</p>}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -324,6 +349,7 @@ export default function LdTechPerformancePage() {
   const { data: staff = [] } = useLdStaff();
   const { data: workTypes = [] } = useLdWorkTypes();
   const { data: clientPrices = [] } = useLdClientPrices();
+  const { data: sharedAllocations = [] } = useAllSharedAllocations();
   const { roles, user } = useAuth();
   const isAdmin = roles.includes("admin") || roles.includes("lab_manager");
 
@@ -355,8 +381,8 @@ export default function LdTechPerformancePage() {
   const resolvedMonthlySalaryConfigs = useMemo(() => mergeLdSalaryConfigsWithStaff(technicians, monthlySalaryConfigs), [technicians, monthlySalaryConfigs]);
   const resolvedFiscalSalaryConfigs = useMemo(() => mergeLdSalaryConfigsWithStaff(technicians, fiscalSalaryConfigs), [technicians, fiscalSalaryConfigs]);
 
-  const monthlyData = useMemo(() => computePerformance(cases, technicians, monthStart, monthEnd, resolvedMonthlySalaryConfigs, workTypes, clientPrices), [cases, technicians, monthStart, monthEnd, resolvedMonthlySalaryConfigs, workTypes, clientPrices]);
-  const fiscalData = useMemo(() => computePerformance(cases, technicians, yearStart, yearEnd, resolvedFiscalSalaryConfigs, workTypes, clientPrices), [cases, technicians, yearStart, yearEnd, resolvedFiscalSalaryConfigs, workTypes, clientPrices]);
+  const monthlyData = useMemo(() => computePerformance(cases, technicians, monthStart, monthEnd, resolvedMonthlySalaryConfigs, workTypes, clientPrices, sharedAllocations), [sharedAllocations, cases, technicians, monthStart, monthEnd, resolvedMonthlySalaryConfigs, workTypes, clientPrices]);
+  const fiscalData = useMemo(() => computePerformance(cases, technicians, yearStart, yearEnd, resolvedFiscalSalaryConfigs, workTypes, clientPrices, sharedAllocations), [sharedAllocations, cases, technicians, yearStart, yearEnd, resolvedFiscalSalaryConfigs, workTypes, clientPrices]);
 
   // Fetch deductions for both periods
   const { data: monthlyDeductions = [] } = useLdSalaryDeductions(mStart, mEnd);
