@@ -369,6 +369,15 @@ export default function LdCasesPage() {
     updateCase.mutate({ id: caseId, ...updates });
   };
 
+  const handleTechnicianChange = (caseId: string, technicianId: string) => {
+    updateCase.mutate({
+      id: caseId,
+      assigned_technician_id: technicianId || null,
+      _changedBy: user?.id,
+      _changedByName: profile?.full_name || "",
+    });
+  };
+
   const clearDateFilter = () => { setDateFrom(undefined); setDateTo(undefined); };
 
   const toggleJobInstruction = (option: string) => {
@@ -566,7 +575,23 @@ export default function LdCasesPage() {
                       </td>
                       <td className="p-3 text-center text-xs">{Number(c.tooth_number) || 1}</td>
                       <td className="p-3 text-xs">{c.client?.clinic_name || "—"}</td>
-                      <td className="p-3 text-xs">{c.technician?.full_name || "Unassigned"}</td>
+                      <td className="p-3 text-xs">
+                        {isAdmin ? (
+                          <Select value={c.assigned_technician_id || "unassigned"} onValueChange={(v) => handleTechnicianChange(c.id, v === "unassigned" ? "" : v)}>
+                            <SelectTrigger className="h-7 text-xs w-[140px]">
+                              <SelectValue>{c.technician?.full_name || "Unassigned"}</SelectValue>
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="unassigned">Unassigned</SelectItem>
+                              {staff.filter((s: any) => s.status === "active").map((s: any) => (
+                                <SelectItem key={s.id} value={s.id}>{s.full_name}</SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        ) : (
+                          c.technician?.full_name || "Unassigned"
+                        )}
+                      </td>
                       <td className="p-3">
                         <Select value={c.status} onValueChange={(v) => handleStatusChange(c.id, c.status, v)}>
                           <SelectTrigger className="h-7 text-xs w-[120px]">
